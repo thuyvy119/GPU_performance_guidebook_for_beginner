@@ -13,12 +13,15 @@ After this chapter, you should be able to:
 ## 1.1 Why start here? A motivating example
 
 Suppose you serve an 8-billion-parameter language model in BF16 (2 bytes per parameter). The weights occupy about 16 GB.
+
 To generate **one token**, a GPU must read roughly all of those weights from memory once. If the GPU's memory bandwidth is 2 TB/s (an illustrative number, not a specific product):
+
 $$
 t \gtrsim \frac{16\ \text{GB}}{2\ \text{TB/s}} = 8\ \text{ms}
 \quad\Rightarrow\quad
 \text{tokens/s} \lesssim \frac{1}{0.008} = 125
 $$
+
 Nothing in that estimate mentions FLOPs, kernels, or clever optimizations. It only counts **bytes moved** and divides by **bandwidth**. Yet it already explains a lot about real inference behavior, including why batching many requests together helps: the weights are read once and serve every sequence in the batch.
 
 This chapter builds the vocabulary and the habit behind that estimate:
@@ -63,23 +66,31 @@ Two terms are easy to confuse:
 - **FLOP/s**: a **rate**, floating-point operations per second. It measures *speed*.
 
 For a matrix multiplication:
+
 $$
 C_{M \times N} = A_{M \times K}\, B_{K \times N}
 $$
+
 Each output element is a dot product of length $K$, which needs $K$ multiplies and about $K$ adds. Under the common convention that one multiply and one add count as two FLOPs (hardware often fuses them into one *fused multiply-add*, FMA, instruction, which is why the convention counts FMA as 2 FLOPs), the approximate arithmetic work is:
+
 $$
 \text{FLOPs} \approx 2MNK
 $$
+
 This is an approximation based on a counting convention. Some contexts count differently, so **state your convention** when reporting performance.
 
 If an operation performs $F$ FLOPs in $t$ seconds, its achieved arithmetic throughput is:
+
 $$
 P = \frac{F}{t}
 $$
+
 For example, a workload performing $2 \times 10^{12}$ FLOPs in $0.01$ s achieves:
+
 $$
 P = \frac{2 \times 10^{12}}{0.01} = 2 \times 10^{14}\ \text{FLOP/s} = 200\ \text{TFLOP/s}
 $$
+
 This is achieved throughput *under the assumed operation count*. It does not guarantee that all the work maps to the same kind of hardware instruction (for example, tensor cores versus regular FP32 units).
 
 **Not all operations are equal.** Additions, multiplications, divisions, and transcendental functions such as `exp` have different hardware costs. Counting each as "one FLOP" is a convenient simplification, and Section 1.6 shows where it becomes misleading.
@@ -87,9 +98,11 @@ This is achieved throughput *under the assumed operation count*. It does not gua
 ## 1.4 Bytes moved
 
 For a first estimate, count the bytes that must be read and written at the tensor level. For an array with $N$ elements and element size $s$ bytes:
+
 $$
 \text{Array size in bytes} = N s
 $$
+
 Common element sizes: FP32 = 4 bytes, FP16/BF16 = 2 bytes, FP8/INT8 = 1 byte.
 
 ### Example: vector addition
@@ -115,13 +128,17 @@ $$
 
 ### Running example
 Take a vector addition over $N = 25 \times 10^6$ FP32 elements:
+
 $$
 \text{Bytes}_{\min} = 3 \times 25 \times 10^6 \times 4 = 300\ \text{MB}
 $$
+
 If the measured time is $0.001$ s:
+
 $$
 B_{\text{effective}} = \frac{300\ \text{MB}}{0.001\ \text{s}} = 300\ \text{GB/s}
 $$
+
 The same measurement gives only $25 \times 10^6 / 0.001 = 25\ \text{GFLOP/s}$, a tiny fraction of a modern GPU's arithmetic peak. For this operation, bytes are the interesting quantity, not FLOPs.
 
 **Unit note:** this example uses decimal units (1 GB = $10^9$ bytes). Be consistent about decimal versus binary units (GiB = $2^{30}$ bytes).
@@ -145,30 +162,37 @@ These estimates create a baseline before comparing PyTorch and Triton implementa
 ### Vector addition
 
 For $c_i = a_i + b_i$:
+
 $$
 F \approx N, \qquad B_{\min} = 3Ns
 $$
+
 For $N = 10^6$ FP32 elements: about $10^6$ additions and 12,000,000 minimum logical bytes.
 
 ### ReLU
 
 For $y_i = \max(0, x_i)$, there is no useful ordinary-FLOP count: implementations use compare, max, or select instructions, not arithmetic. Under the strict convention ReLU performs **0 FLOPs**. In this repo we report it as approximately **$N$ elementwise compare/select operations**, and we do not compare that number directly with FLOP counts from other operations.
+
 $$
 B_{\min} = 2Ns
 $$
+
 For $N = 10^6$ FP32 elements: 8,000,000 minimum logical bytes.
 
 ### Row-wise sum
 
 For an $M \times N$ matrix reduced to one value per row, each row needs $N - 1$ additions:
+
 $$
 F \approx M(N-1), \qquad B_{\min} = MNs + Ms
 $$
+
 For $M = 1024$, $N = 256$, FP32 input and output: 261,120 additions and 1,052,672 minimum logical bytes.
 
 ### Softmax
 
 For each row:
+
 $$
 m = \max_i x_i, \qquad e_i = \exp(x_i - m), \qquad y_i = \frac{e_i}{\sum_j e_j}
 $$
@@ -185,9 +209,11 @@ Work per row:
 A single FLOP count hides the cost differences between these operation types (an `exp` or a division costs more than an addition), so **report exponentials and comparisons separately**.
 
 For input and output only:
+
 $$
 B_{\min} = 2MNs
 $$
+
 This is a **lower bound**. It assumes no intermediate tensor is written and read back. A naive implementation that makes separate passes for max, exp-sum, and normalize can read the input several times and move more data. A fused implementation can approach the lower bound. Chapters 14 and 17 show how.
 
 For $M = 1024$, $N = 256$, FP32: about $1.3 \times 10^6$ operations (of which 262,144 are exponentials) and 2,097,152 minimum logical bytes.
@@ -195,9 +221,11 @@ For $M = 1024$, $N = 256$, FP32: about $1.3 \times 10^6$ operations (of which 26
 ### Matrix multiplication
 
 For $C = AB$ with $A: [M, K]$, $B: [K, N]$, $C: [M, N]$:
+
 $$
 F \approx 2MNK, \qquad B_{\min} = s\,(MK + KN + MN)
 $$
+
 For $M = N = K = 1024$, FP32: 2,147,483,648 FLOPs and 12,582,912 minimum logical bytes. Real traffic depends on tiling, cache behavior, and reuse.
 
 **Record the precision mode.** FP32 matrix multiplication may run on tensor cores as TF32 depending on settings (for example, `torch.set_float32_matmul_precision`). That changes both numerical results and the achievable peak, so state it next to your measurement.
@@ -205,6 +233,7 @@ For $M = N = K = 1024$, FP32: 2,147,483,648 FLOPs and 12,582,912 minimum logical
 ### Layer normalization
 
 For each row, layer normalization computes a mean and variance, normalizes, and may apply a learned scale $\gamma$ and bias $\beta$:
+
 $$
 \mu = \frac{1}{N}\sum_i x_i, \qquad
 \sigma^2 = \frac{1}{N}\sum_i (x_i - \mu)^2, \qquad
@@ -225,6 +254,7 @@ A rough count per row, reusing the centered values $x_i - \mu$:
 So the total is on the order of $5MN$ to $7MN$ simple operations, plus the reductions' structure and one reciprocal square root per row. This is an **order-of-magnitude estimate, not a precise FLOP count**. The exact work depends on the variance algorithm (Chapter 15 covers Welford's method), the affine parameters, and fusion.
 
 For input, output, and two shared parameter vectors:
+
 $$
 B_{\min} = 2MNs + 2Ns
 $$
